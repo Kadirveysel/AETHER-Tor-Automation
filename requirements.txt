@@ -1,4 +1,3 @@
-requests
-pysocks
-stem
-rich
+requests[socks]>=2.31
+stem>=1.8.2
+rich>=13.0

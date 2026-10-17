@@ -1,153 +1,175 @@
-import requests
-import time
-import socket
-import platform
-import os
-from stem import Signal
-from stem.control import Controller
-from requests.exceptions import RequestException
+"""AETHER command-line interface: rotate your Tor identity and verify it."""
 
-# VISUAL LIBRARIES
+from __future__ import annotations
+
+import argparse
+import getpass
+import os
+import sys
+import time
+from typing import List, Optional
+
+from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich.table import Table
-from rich.align import Align
 
-# Initialize Console
+from rotator import (
+    TorAuthError,
+    TorConnectionError,
+    TorError,
+    TorRotator,
+    __version__,
+)
+
 console = Console()
 
-class TorRotator:
-    def __init__(self):
-        # Auto-discovery for ports (Windows vs Linux)
-        self.control_port = self.find_open_port([9151, 9051])
-        self.proxy_port = self.find_open_port([9150, 9050])
 
-        if not self.control_port or not self.proxy_port:
-            raise ConnectionError("Tor ports not found! Is Tor Browser or Service running?")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aether",
+        description="Rotate your Tor exit IP via the control port and verify the result.",
+    )
+    parser.add_argument(
+        "-n", "--count", type=int, default=1,
+        help="number of identity rotations to perform (default: 1)",
+    )
+    parser.add_argument(
+        "-i", "--interval", type=float, default=0.0,
+        help="extra seconds to wait between rotations (Tor already enforces ~10s)",
+    )
+    parser.add_argument(
+        "-a", "--attempts", type=int, default=3,
+        help="NEWNYM retries per rotation if Tor picks the same exit (default: 3)",
+    )
+    parser.add_argument("--control-port", type=int, help="Tor control port (default: auto-detect)")
+    parser.add_argument("--socks-port", type=int, help="Tor SOCKS port (default: auto-detect)")
+    parser.add_argument(
+        "--ask-password", action="store_true",
+        help="prompt for the control-port password (or set TOR_CONTROL_PASSWORD)",
+    )
+    parser.add_argument(
+        "--no-clear", action="store_true", help="do not clear the screen on start",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser
 
-        self.proxies = {
-            'http': f'socks5h://127.0.0.1:{self.proxy_port}',
-            'https': f'socks5h://127.0.0.1:{self.proxy_port}'
-        }
 
-    def find_open_port(self, ports):
-        for port in ports:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(('127.0.0.1', port)) == 0:
-                    return port
-        return None
+def print_banner() -> None:
+    banner = (
+        "[bold green]AETHER TOR AUTOMATION[/bold green]\n"
+        "[cyan]Tor identity rotation & exit-IP verification[/cyan]\n"
+        f"[dim]v{__version__}[/dim]"
+    )
+    console.print(Panel(Align.center(banner), border_style="green", expand=True))
 
-    def get_current_ip(self):
-        """
-        Creates a disposable session for each request to force a fresh circuit.
-        This solves the 'Keep-Alive' issue where Python sticks to the old IP.
-        """
-        try:
-            with requests.Session() as s:
-                s.proxies.update(self.proxies)
-                # 'Connection': 'close' forces the socket to reset
-                response = s.get('https://httpbin.org/ip', timeout=20, headers={'Connection': 'close'})
-                return response.json().get('origin')
-        except RequestException:
-            return None
 
-    def rotate_ip(self):
-        console.print(f"\n[bold yellow][!][/bold yellow] Sending signal via Port {self.control_port}...")
-        
-        try:
-            with Controller.from_port(port=self.control_port) as controller:
-                controller.authenticate()
-                controller.signal(Signal.NEWNYM)
-            
-            # Visual Progress Bar
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"), # HATA BURADAYDI, DUZELTILDI
-                console=console,
-                transient=True 
-            ) as progress:
-                task = progress.add_task("[cyan]Building new circuit...", total=100)
-                for _ in range(100):
-                    time.sleep(0.15)
-                    progress.update(task, advance=1)
-            
-            return True
-        except Exception as e:
-            console.print(f"[bold red][-] Error: {e}[/bold red]")
-            return False
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.count < 1 or args.attempts < 1 or args.interval < 0:
+        console.print("[bold red]--count and --attempts must be >= 1, --interval >= 0[/bold red]")
+        return 2
 
-def print_banner():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    banner_text = """
-[bold green]AETHER TOR AUTOMATION[/bold green]
-[cyan]Dynamic Identity Shifting Tool[/cyan]
-[dim]v1.0 Stable Release[/dim]
-    """
-    console.print(Panel(Align.center(banner_text), title="System Ready", border_style="green", expand=True))
-
-def main():
+    if not args.no_clear:
+        console.clear()
     print_banner()
-    
+
+    password = os.environ.get("TOR_CONTROL_PASSWORD")
+    if args.ask_password:
+        password = getpass.getpass("Tor control password: ")
+
     try:
-        rotator = TorRotator()
-    except Exception as e:
-        console.print(f"[bold red]❌ Initialization Error:[/bold red] {e}")
-        return
+        rotator = TorRotator(
+            control_port=args.control_port,
+            socks_port=args.socks_port,
+            password=password,
+        )
+    except TorError as exc:
+        console.print(f"[bold red]Initialization error:[/bold red] {exc}")
+        return 1
 
-    # Info Panel
-    info_text = f"Proxy Port: [bold cyan]{rotator.proxy_port}[/bold cyan] | Control Port: [bold cyan]{rotator.control_port}[/bold cyan]"
-    console.print(Panel(Align.center(info_text), border_style="blue", expand=True))
+    console.print(
+        Panel(
+            Align.center(
+                f"SOCKS port: [bold cyan]{rotator.socks_port}[/bold cyan]  |  "
+                f"Control port: [bold cyan]{rotator.control_port}[/bold cyan]"
+            ),
+            border_style="blue",
+            expand=True,
+        )
+    )
 
-    # 1. CHECK INITIAL IDENTITY
-    with console.status("[bold blue]Verifying current identity...", spinner="dots"):
-        current_ip = rotator.get_current_ip()
-
-    if not current_ip:
-        console.print("[bold red]❌ Error: No internet connection via Tor.[/bold red]")
-        return
-
-    # Table Setup
-    table = Table(title="Identity Shift Analysis", show_header=True, header_style="bold magenta", expand=True)
-    table.add_column("Attempt", style="dim", ratio=1)
-    table.add_column("IP Address", justify="center", ratio=2)
-    table.add_column("Status", justify="right", ratio=1)
-    
-    table.add_row("Initial", f"[cyan]{current_ip}[/cyan]", platform.system())
-
-    # 2. ROTATION LOOP
-    max_attempts = 3
-    success = False
-    
-    for i in range(max_attempts):
-        rotator.rotate_ip()
-        
-        # Verify IP
-        with console.status(f"[bold yellow]Verifying IP (Attempt {i+1}/{max_attempts})...", spinner="earth"):
-            time.sleep(3) # Wait for Tor bridge latency
-            new_ip = rotator.get_current_ip()
-        
-        if new_ip and new_ip != current_ip:
-            table.add_row(f"Attempt {i+1}", f"[green]{new_ip}[/green]", "✅ CHANGED")
-            success = True
-            break
-        else:
-            table.add_row(f"Attempt {i+1}", f"[red]{new_ip}[/red]", "❌ SAME")
-            console.print(f"[dim]   -> IP persisted. Retrying...[/dim]")
-
-    # 3. RESULT
-    console.print(table)
-    
-    if success:
-        console.print("\n[bold green]🚀 SUCCESS: New identity established.[/bold green]")
-    else:
-        console.print("\n[bold red]💀 FAILED: Could not switch identity.[/bold red]")
-        console.print("[yellow]Tip: Try restarting Tor Browser to refresh the bridge connection.[/yellow]")
-
-if __name__ == "__main__":
     try:
-        main()
+        with console.status("[bold blue]Checking current exit...", spinner="dots"):
+            current = rotator.get_exit_info()
+    except TorError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        return 1
+
+    if not current.is_tor:
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] the Tor Project reports this traffic "
+            "is NOT exiting through Tor. Check which proxy port is in use."
+        )
+
+    table = Table(title="Identity rotation", header_style="bold magenta", expand=True)
+    table.add_column("#", style="dim", ratio=1)
+    table.add_column("Exit IP", justify="center", ratio=3)
+    table.add_column("Via Tor", justify="center", ratio=1)
+    table.add_column("Status", justify="right", ratio=2)
+    table.add_row("start", f"[cyan]{current.ip}[/cyan]", "yes" if current.is_tor else "[red]no[/red]", "-")
+
+    changed_count = 0
+    exit_code = 0
+    try:
+        for index in range(1, args.count + 1):
+            try:
+                with console.status(
+                    f"[bold yellow]Rotation {index}/{args.count} "
+                    "(waiting for Tor, then verifying)...",
+                    spinner="earth",
+                ):
+                    result = rotator.rotate_ip(max_attempts=args.attempts, previous=current)
+            except TorAuthError as exc:
+                console.print(f"[bold red]Authentication error:[/bold red] {exc}")
+                exit_code = 1
+                break
+            except TorConnectionError as exc:
+                console.print(f"[bold red]Connection error:[/bold red] {exc}")
+                exit_code = 1
+                break
+            except TorError as exc:
+                console.print(f"[bold red]Error:[/bold red] {exc}")
+                exit_code = 1
+                break
+
+            current = result.current
+            via_tor = "yes" if current.is_tor else "[red]no[/red]"
+            if result.changed:
+                changed_count += 1
+                status = f"[green]changed[/green] (try {result.attempts})"
+                ip_cell = f"[green]{current.ip}[/green]"
+            else:
+                status = "[yellow]same exit chosen[/yellow]"
+                ip_cell = f"[yellow]{current.ip}[/yellow]"
+            table.add_row(str(index), ip_cell, via_tor, status)
+
+            if index < args.count and args.interval > 0:
+                time.sleep(args.interval)
     except KeyboardInterrupt:
         console.print("\n[bold red]Aborted by user.[/bold red]")
+        exit_code = 130
+
+    console.print(table)
+    console.print(f"\n{changed_count} of {args.count} rotation(s) produced a new exit IP.")
+    if exit_code == 0 and changed_count < args.count:
+        console.print(
+            "[dim]Tor can legitimately pick the same exit again; "
+            "increase --attempts if you need a guaranteed change.[/dim]"
+        )
+        exit_code = 1
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
