@@ -1,6 +1,7 @@
 """Unit tests for rotator.py. No real Tor instance or network is needed."""
 
 import pytest
+import requests
 import stem
 from stem.connection import IncorrectPassword
 
@@ -125,9 +126,14 @@ class FakeResponse:
         return self._payload
 
 
+TOR_URL, IPIFY_URL, HTTPBIN_URL = (e.url for e in rotator.DEFAULT_ENDPOINTS)
+
+
 class FakeSession:
-    payload = {"IsTor": True, "IP": "203.0.113.7"}
-    seen_headers = None
+    """Serves canned JSON per URL; a value that is an Exception is raised."""
+
+    responses = {}
+    calls = []
 
     def __init__(self):
         self.proxies = {}
@@ -139,22 +145,63 @@ class FakeSession:
         return False
 
     def get(self, url, timeout, headers):
-        type(self).seen_headers = headers
-        return FakeResponse(type(self).payload)
+        type(self).calls.append((url, headers))
+        result = type(self).responses[url]
+        if isinstance(result, Exception):
+            raise result
+        return FakeResponse(result)
 
 
-def test_get_exit_info_parses_tor_project_response(monkeypatch):
+@pytest.fixture
+def fake_session(monkeypatch):
+    FakeSession.responses = {}
+    FakeSession.calls = []
     monkeypatch.setattr(rotator.requests, "Session", FakeSession)
+    return FakeSession
+
+
+def test_get_exit_info_parses_tor_project_response(fake_session):
+    fake_session.responses[TOR_URL] = {"IsTor": True, "IP": "203.0.113.7"}
     instance = TorRotator(control_port=9051, socks_port=9050)
     info = instance.get_exit_info()
     assert info == ExitInfo(ip="203.0.113.7", is_tor=True)
-    assert FakeSession.seen_headers == {"Connection": "close"}
+    assert fake_session.calls == [(TOR_URL, {"Connection": "close"})]
 
 
-def test_get_exit_info_wraps_bad_payload(monkeypatch):
-    monkeypatch.setattr(FakeSession, "payload", {"unexpected": "shape"})
-    monkeypatch.setattr(rotator.requests, "Session", FakeSession)
-    instance = TorRotator(control_port=9051, socks_port=9050)
+def test_get_exit_info_retries_primary_before_falling_back(fake_session):
+    fake_session.responses[TOR_URL] = requests.ConnectionError("SSL EOF")
+    fake_session.responses[IPIFY_URL] = {"ip": "198.51.100.9"}
+    instance = TorRotator(control_port=9051, socks_port=9050, retries=1)
+    info = instance.get_exit_info()
+    # Fallback endpoints cannot confirm Tor usage, so is_tor stays unknown.
+    assert info == ExitInfo(ip="198.51.100.9", is_tor=None)
+    assert [url for url, _ in fake_session.calls] == [TOR_URL, TOR_URL, IPIFY_URL]
+
+
+def test_get_exit_info_takes_first_ip_of_comma_separated_origin(fake_session):
+    fake_session.responses[HTTPBIN_URL] = {"origin": "198.51.100.9, 10.0.0.1"}
+    instance = TorRotator(
+        control_port=9051,
+        socks_port=9050,
+        endpoints=[rotator.IpCheckEndpoint(HTTPBIN_URL, "origin")],
+    )
+    assert instance.get_exit_info().ip == "198.51.100.9"
+
+
+def test_get_exit_info_reports_every_failed_endpoint(fake_session):
+    for url in (TOR_URL, IPIFY_URL, HTTPBIN_URL):
+        fake_session.responses[url] = requests.Timeout("slow")
+    instance = TorRotator(control_port=9051, socks_port=9050, retries=0)
+    with pytest.raises(TorConnectionError) as excinfo:
+        instance.get_exit_info()
+    for url in (TOR_URL, IPIFY_URL, HTTPBIN_URL):
+        assert url in str(excinfo.value)
+
+
+def test_get_exit_info_wraps_bad_payload(fake_session):
+    for url in (TOR_URL, IPIFY_URL, HTTPBIN_URL):
+        fake_session.responses[url] = {"unexpected": "shape"}
+    instance = TorRotator(control_port=9051, socks_port=9050, retries=0)
     with pytest.raises(TorConnectionError):
         instance.get_exit_info()
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import socket
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import requests
 import stem
@@ -32,11 +32,31 @@ LOCALHOST = "127.0.0.1"
 #   Tor system service (Linux/Kali):          9051 / 9050
 TOR_PORT_PAIRS: Tuple[Tuple[int, int], ...] = ((9151, 9150), (9051, 9050))
 
-# The Tor Project's own endpoint: returns {"IsTor": bool, "IP": "x.x.x.x"}.
-TOR_CHECK_URL = "https://check.torproject.org/api/ip"
-
 # Tor rate-limits NEWNYM; requests sent sooner than this are delayed by Tor.
 NEWNYM_MIN_INTERVAL = 10.0
+
+
+@dataclass(frozen=True)
+class IpCheckEndpoint:
+    """A JSON endpoint that reports the caller's IP address.
+
+    ``tor_key`` is the JSON field that says whether the request came through
+    Tor; endpoints without one leave that fact unknown.
+    """
+
+    url: str
+    ip_key: str
+    tor_key: Optional[str] = None
+
+
+# Tried in order; the first one that answers wins. The Tor Project's endpoint
+# comes first because it also confirms the traffic really exits through Tor.
+# The others are fallbacks for when it is unreachable from a given exit.
+DEFAULT_ENDPOINTS: Tuple[IpCheckEndpoint, ...] = (
+    IpCheckEndpoint("https://check.torproject.org/api/ip", "IP", "IsTor"),
+    IpCheckEndpoint("https://api.ipify.org?format=json", "ip"),
+    IpCheckEndpoint("https://httpbin.org/ip", "origin"),
+)
 
 
 class TorError(Exception):
@@ -53,10 +73,13 @@ class TorAuthError(TorError):
 
 @dataclass(frozen=True)
 class ExitInfo:
-    """What the outside world sees when we connect through Tor."""
+    """What the outside world sees when we connect through Tor.
+
+    ``is_tor`` is None when the endpoint that answered cannot tell.
+    """
 
     ip: str
-    is_tor: bool
+    is_tor: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -100,8 +123,9 @@ class TorRotator:
         socks_port: Optional[int] = None,
         password: Optional[str] = None,
         host: str = LOCALHOST,
-        check_url: str = TOR_CHECK_URL,
-        timeout: float = 20.0,
+        endpoints: Sequence[IpCheckEndpoint] = DEFAULT_ENDPOINTS,
+        timeout: float = 15.0,
+        retries: int = 1,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -120,8 +144,9 @@ class TorRotator:
         self.control_port = control_port
         self.socks_port = socks_port
         self.password = password
-        self.check_url = check_url
+        self.endpoints = tuple(endpoints)
         self.timeout = timeout
+        self.retries = retries
         self._sleep = sleep
         self._clock = clock
         self._last_newnym: Optional[float] = None
@@ -130,28 +155,50 @@ class TorRotator:
         proxy = f"socks5h://{host}:{socks_port}"
         self.proxies: Dict[str, str] = {"http": proxy, "https": proxy}
 
-    def get_exit_info(self) -> ExitInfo:
-        """Ask the Tor Project which IP we appear as, and whether it is Tor.
+    def _query(self, endpoint: IpCheckEndpoint) -> ExitInfo:
+        """Ask one endpoint which IP we appear as (raises on any failure).
 
         A throw-away session with ``Connection: close`` is used so a pooled
         keep-alive socket can never hide the effect of a rotation.
         """
-        try:
-            with requests.Session() as session:
-                session.proxies.update(self.proxies)
-                response = session.get(
-                    self.check_url,
-                    timeout=self.timeout,
-                    headers={"Connection": "close"},
-                )
-                response.raise_for_status()
-                data = response.json()
-            return ExitInfo(ip=str(data["IP"]), is_tor=bool(data.get("IsTor", False)))
-        except (RequestException, ValueError, KeyError) as exc:
-            raise TorConnectionError(
-                f"Could not reach {self.check_url} through the Tor SOCKS proxy "
-                f"on port {self.socks_port}: {exc}"
-            ) from exc
+        with requests.Session() as session:
+            session.proxies.update(self.proxies)
+            response = session.get(
+                endpoint.url,
+                timeout=self.timeout,
+                headers={"Connection": "close"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        # Some endpoints return a comma-separated list; the first entry is ours.
+        ip = str(data[endpoint.ip_key]).split(",")[0].strip()
+        if not ip:
+            raise ValueError("empty IP in response")
+        is_tor = None
+        if endpoint.tor_key is not None and endpoint.tor_key in data:
+            is_tor = bool(data[endpoint.tor_key])
+        return ExitInfo(ip=ip, is_tor=is_tor)
+
+    def get_exit_info(self) -> ExitInfo:
+        """Find out which IP the outside world sees for traffic via Tor.
+
+        Endpoints are tried in order (each up to ``retries`` extra times); the
+        first answer wins. If only a fallback answers, ``is_tor`` is None
+        because that endpoint cannot confirm Tor usage.
+        """
+        failures = []
+        for endpoint in self.endpoints:
+            for _ in range(1 + max(0, self.retries)):
+                try:
+                    return self._query(endpoint)
+                except (RequestException, ValueError, KeyError, TypeError) as exc:
+                    reason = f"{type(exc).__name__}: {str(exc)[:120]}"
+            failures.append(f"  - {endpoint.url} -> {reason}")
+        raise TorConnectionError(
+            f"No IP-check endpoint answered through the Tor SOCKS proxy on port "
+            f"{self.socks_port}. Tor may still be bootstrapping, or the exit "
+            f"blocks these sites; try again in a moment.\n" + "\n".join(failures)
+        )
 
     def _wait_for_newnym_slot(self) -> None:
         """Sleep until Tor will accept another NEWNYM without delaying it."""

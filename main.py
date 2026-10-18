@@ -55,6 +55,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def tor_label(is_tor: Optional[bool]) -> str:
+    """Table cell for the 'Via Tor' column; None means the endpoint can't tell."""
+    if is_tor is None:
+        return "[dim]?[/dim]"
+    return "yes" if is_tor else "[red]no[/red]"
+
+
 def print_banner() -> None:
     banner = (
         "[bold green]AETHER TOR AUTOMATION[/bold green]\n"
@@ -106,10 +113,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         return 1
 
-    if not current.is_tor:
+    if current.is_tor is False:
         console.print(
             "[bold yellow]Warning:[/bold yellow] the Tor Project reports this traffic "
             "is NOT exiting through Tor. Check which proxy port is in use."
+        )
+    elif current.is_tor is None:
+        console.print(
+            "[dim]Note: check.torproject.org was unreachable, so a fallback IP service "
+            "answered. The IP is shown, but Tor usage cannot be confirmed.[/dim]"
         )
 
     table = Table(title="Identity rotation", header_style="bold magenta", expand=True)
@@ -117,7 +129,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     table.add_column("Exit IP", justify="center", ratio=3)
     table.add_column("Via Tor", justify="center", ratio=1)
     table.add_column("Status", justify="right", ratio=2)
-    table.add_row("start", f"[cyan]{current.ip}[/cyan]", "yes" if current.is_tor else "[red]no[/red]", "-")
+    table.add_row("start", f"[cyan]{current.ip}[/cyan]", tor_label(current.is_tor), "-")
 
     changed_count = 0
     exit_code = 0
@@ -144,7 +156,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
 
             current = result.current
-            via_tor = "yes" if current.is_tor else "[red]no[/red]"
+            via_tor = tor_label(current.is_tor)
             if result.changed:
                 changed_count += 1
                 status = f"[green]changed[/green] (try {result.attempts})"

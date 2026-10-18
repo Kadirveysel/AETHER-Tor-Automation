@@ -4,13 +4,13 @@
 
 AETHER asks a local Tor instance for a new identity through the **Tor control port** (`NEWNYM`) and then verifies the result against the Tor Project's own check endpoint, so you can see whether the exit IP really changed and whether your traffic is really leaving through Tor. It is aimed at security researchers and OSINT analysts who need to rotate exits during authorized testing.
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python)
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge&logo=python)
 ![CI](https://img.shields.io/github/actions/workflow/status/Kadirveysel/AETHER-Tor-Automation/ci.yml?branch=main&style=for-the-badge&label=CI)
 ![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)
 
 ## 🚀 Features
 
-* **Real rotation, real verification:** sends `NEWNYM`, then checks the exit through `check.torproject.org` and reports both the IP and whether Tor is actually in use (`IsTor`).
+* **Real rotation, real verification:** sends `NEWNYM`, then checks the exit through `check.torproject.org` and reports both the IP and whether Tor is actually in use (`IsTor`). If that site is unreachable from the current exit, it retries and falls back to `api.ipify.org` and `httpbin.org`; those can show the IP but cannot confirm Tor usage, so the "Via Tor" column shows `?`.
 * **Respects Tor's rate limit:** consecutive rotations wait out Tor's ~10 second `NEWNYM` interval instead of sleeping a fixed, arbitrary time.
 * **Automatic retries:** if Tor happens to pick the same exit again, AETHER retries (`--attempts`) and tells you honestly when the IP did not change.
 * **Port auto-detection:** tries Tor Browser (`9151`/`9150`) and the Tor system service (`9051`/`9050`) as matched pairs, or take ports explicitly with `--control-port` / `--socks-port`.
@@ -24,7 +24,7 @@ AETHER asks a local Tor instance for a new identity through the **Tor control po
 
 ## 📋 Prerequisites
 
-* Python 3.8+
+* Python 3.9+
 * A running Tor instance: either **Tor Browser** (just keep it open) or the **Tor service**.
 
 For the Tor service, enable the control port in `torrc` (usually `/etc/tor/torrc`) and restart Tor:
@@ -85,7 +85,7 @@ print(result.previous.ip, "->", result.current.ip, "changed:", result.changed)
 * A new identity affects **new connections only**. Connections that are already open keep their old circuit.
 * Tor chooses exits itself; getting the same exit twice is normal and not an error.
 * This tool changes your Tor circuit. It does not make other software anonymous: browser fingerprinting, logged-in accounts and application-level leaks are outside its scope.
-* Verification depends on `check.torproject.org` being reachable.
+* Some exit nodes block or break TLS to certain sites (you may see `SSLEOFError`). AETHER retries and uses fallback services, but if every IP-check site fails through a given exit, just run it again to get a different exit.
 
 ## 🧪 Development
 
@@ -104,7 +104,7 @@ The tests mock the Tor control port and the network, so no Tor instance is neede
 | `Tor ports not found` | Tor Browser/service is not running, or it uses non-default ports. Pass `--control-port` and `--socks-port`. |
 | `Authentication ... failed` | Cookie file not readable (join the `debian-tor` group) or a password is required (`--ask-password`). |
 | `Could not connect to the control port` | `ControlPort` is not enabled in `torrc`, or Tor was not restarted after editing it. |
-| `Could not reach check.torproject.org` | Tor has not finished bootstrapping, or the SOCKS port is wrong. |
+| `No IP-check endpoint answered ...` | Tor has not finished bootstrapping, the current exit blocks the check sites (just run again), or the SOCKS port is wrong. The message lists the error for each endpoint. |
 | `Warning: ... NOT exiting through Tor` | The SOCKS port you are using is not Tor's. |
 
 ## ⚠️ Disclaimer
