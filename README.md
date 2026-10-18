@@ -20,7 +20,7 @@ AETHER asks a local Tor instance for a new identity through the **Tor control po
 
 ## 📸 Screenshots
 
-<img width="1442" height="492" alt="aether" src="https://github.com/user-attachments/assets/6f1691f2-27f1-4f2b-be51-314cfc548bd3" />
+<img width="1446" alt="AETHER rotating a Tor exit IP and verifying it" src="docs/screenshot.png" />
 
 ## 📋 Prerequisites
 
