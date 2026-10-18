@@ -3,11 +3,26 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.ruff_cache/
+
+# Packaging / build output
+dist/
+build/
+*.egg-info/
 
 # Environments
 .env
 venv/
 env/
+.venv/
+
+# Logs
+*.log
+
+# Editors
+.vscode/
+.idea/
 
 # System files
 .DS_Store
